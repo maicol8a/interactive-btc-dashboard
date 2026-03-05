@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BTC · Liquidity Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Space+Grotesk:wght@700&display=swap" rel="stylesheet" />
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { width: 100%; height: 100%; background: #060a12; overflow: hidden; }
+    ::-webkit-scrollbar { width: 4px; background: #0a0e1a; }
+    ::-webkit-scrollbar-thumb { background: #1e2535; border-radius: 4px; }
+    @keyframes pulse { 0%,100%{ opacity:1 } 50%{ opacity:0.3 } }
+    .tf-btn {
+      background: #0d1117; border: 1px solid #1e2535; color: #4a5568;
+      padding: 4px 12px; border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace; font-size: 11px;
+      cursor: pointer; transition: all 0.15s;
+    }
+    .tf-btn.active { background: #1e2535; border-color: #f7c948; color: #f7c948; }
+    .tf-btn:hover { border-color: #4a5568; color: #e2e8f0; }
+    .toggle-btn {
+      background: transparent; border: 1px solid #1e2535; color: #4a5568;
+      padding: 3px 10px; border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace; font-size: 10px;
+      cursor: pointer; transition: all 0.15s;
+    }
+    .toggle-btn.active { border-color: rgba(0,229,160,0.27); color: #00e5a0; background: rgba(0,229,160,0.07); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // ── COLOURS (edit here to retheme everything) ────────────────────────────
+    const C = {
+      bull:    "#00e5a0",
+      bear:    "#ff3b5c",
+      price:   "#f7c948",
+      bg:      "#060a12",
+      panel:   "#0a0e1a",
+      grid:    "#1e2535",
+      muted:   "#4a5568",
+      text:    "#e2e8f0",
+    };
+
+    // ── DATA GENERATION ──────────────────────────────────────────────────────
+    function generateCandles(count, basePrice, timeframe) {
+      const candles = [];
+      let price = basePrice;
+      const volatility = timeframe === "1H" ? 0.004 : 0.012;
+      const now = Date.now();
+      const interval = timeframe === "1H" ? 3600000 : 14400000;
+      for (let i = count; i >= 0; i--) {
+        const change = (Math.random() - 0.48) * volatility * price;
+        const open = price;
+        const close = price + change;
+        const high = Math.max(open, close) + Math.random() * volatility * price * 0.5;
+        const low  = Math.min(open, close) - Math.random() * volatility * price * 0.5;
+        const volume = 200 + Math.random() * 800;
+        const oi = 18000 + Math.sin(i * 0.15) * 3000 + Math.random() * 1000 + (count - i) * 20;
+        candles.push({
+          time: now - i * interval,
+          open: +open.toFixed(1), close: +close.toFixed(1),
+          high: +high.toFixed(1), low: +low.toFixed(1),
+          volume: +volume.toFixed(0), oi: +oi.toFixed(0),
+        });
+        price = close;
+      }
+      return candles;
+    }
+
+    function generateLiquidationLevels(currentPrice) {
+      const levels = [];
+      for (let i = 1; i <= 12; i++) {
+        const pct = 0.004 + Math.random() * 0.015;
+        levels.push({ price: +(currentPrice * (1 + pct * i * 0.4)).toFixed(1), amount: +(20 + Math.random() * 180).toFixed(1), side: "short" });
+      }
+      for (let i = 1; i <= 12; i++) {
+        const pct = 0.004 + Math.random() * 0.015;
+        levels.push({ price: +(currentPrice * (1 - pct * i * 0.4)).toFixed(1), amount: +(20 + Math.random() * 200).toFixed(1), side: "long" });
+      }
+      return levels;
+    }
+
+    function generateOrderBook(currentPrice) {
+      const bids = [], asks = [];
+      for (let i = 1; i <= 20; i++) {
+        bids.push({ price: +(currentPrice * (1 - i * 0.0008)).toFixed(1), volume: +((50 + Math.random() * 150) * Math.exp(-i * 0.1)).toFixed(2) });
+        asks.push({ price: +(currentPrice * (1 + i * 0.0008)).toFixed(1), volume: +((50 + Math.random() * 150) * Math.exp(-i * 0.1)).toFixed(2) });
+      }
+      return { bids, asks };
+    }
+
+    // ── HELPERS ──────────────────────────────────────────────────────────────
+    const fmt  = n => n?.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    const fmtK = n => n >= 1000 ? (n / 1000).toFixed(1) + "K" : n.toFixed(0);
+
+    // ── CANDLE CHART ─────────────────────────────────────────────────────────
+    function CandleChart({ candles, liquidations, width, height }) {
+      if (!candles.length || width < 10 || height < 10) return null;
+      const PAD = { top: 20, right: 68, bottom: 32, left: 72 };
+      const chartW = width  - PAD.left - PAD.right;
+      const chartH = height - PAD.top  - PAD.bottom;
+      const prices = candles.flatMap(c => [c.high, c.low]);
+      const minP = Math.min(...prices) * 0.999;
+      const maxP = Math.max(...prices) * 1.001;
+      const range = maxP - minP;
+      const toY = p  => PAD.top  + ((maxP - p) / range) * chartH;
+      const toX = i  => PAD.left + (i / (candles.length - 1)) * chartW;
+      const cW  = Math.max(2, (chartW / candles.length) * 0.7);
+      const curP = candles[candles.length - 1].close;
+      const gridPs = Array.from({ length: 7 }, (_, i) => minP + (range / 6) * i);
+
+      return (
+        <svg width={width} height={height} style={{ display:"block" }}>
+          <defs>
+            <linearGradient id="llg" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stopColor={C.bear} stopOpacity="0" />
+              <stop offset="100%" stopColor={C.bear} stopOpacity="0.35" />
+            </linearGradient>
+            <linearGradient id="slg" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stopColor={C.bull} stopOpacity="0" />
+              <stop offset="100%" stopColor={C.bull} stopOpacity="0.35" />
+            </linearGradient>
+          </defs>
+
+          {/* grid */}
+          {gridPs.map((p, i) => (
+            <g key={i}>
+              <line x1={PAD.left} y1={toY(p)} x2={PAD.left + chartW} y2={toY(p)} stroke={C.grid} strokeWidth="1" />
+              <text x={PAD.left - 6} y={toY(p) + 4} textAnchor="end" fill={C.muted} fontSize="10" fontFamily="JetBrains Mono, monospace">{fmt(p)}</text>
+            </g>
+          ))}
+
+          {/* liquidation bands */}
+          {liquidations.map((liq, i) => {
+            const bH = Math.max(2, (liq.amount / 200) * 12);
+            const y  = toY(liq.price);
+            if (y < PAD.top || y > PAD.top + chartH) return null;
+            return (
+              <rect key={i} x={PAD.left} y={y - bH/2} width={chartW} height={bH}
+                fill={liq.side === "long" ? "url(#llg)" : "url(#slg)"} rx="1" />
+            );
+          })}
+
+          {/* liquidation lines */}
+          {liquidations.map((liq, i) => {
+            const y = toY(liq.price);
+            if (y < PAD.top || y > PAD.top + chartH) return null;
+            const col = liq.side === "long" ? C.bear : C.bull;
+            const op  = 0.2 + (liq.amount / 200) * 0.5;
+            return <line key={"ll"+i} x1={PAD.left} y1={y} x2={PAD.left+chartW} y2={y}
+              stroke={col} strokeWidth="0.5" strokeOpacity={op} strokeDasharray="2,4" />;
+          })}
+
+          {/* candles */}
+          {candles.map((c, i) => {
+            const x   = toX(i);
+            const up  = c.close >= c.open;
+            const col = up ? C.bull : C.bear;
+            const bT  = toY(Math.max(c.open, c.close));
+            const bB  = toY(Math.min(c.open, c.close));
+            const bH  = Math.max(1, bB - bT);
+            return (
+              <g key={i}>
+                <line x1={x} y1={toY(c.high)} x2={x} y2={toY(c.low)} stroke={col} strokeWidth="1" strokeOpacity="0.7" />
+                <rect x={x - cW/2} y={bT} width={cW} height={bH}
+                  fill={up ? col : "transparent"} stroke={col} strokeWidth={up ? 0 : 1} opacity="0.9" />
+              </g>
+            );
+          })}
+
+          {/* current price */}
+          <line x1={PAD.left} y1={toY(curP)} x2={PAD.left+chartW} y2={toY(curP)}
+            stroke={C.price} strokeWidth="1" strokeDasharray="4,3" />
+          <rect x={PAD.left+chartW+2} y={toY(curP)-9} width={62} height={18} fill={C.price} rx="3" />
+          <text x={PAD.left+chartW+33} y={toY(curP)+4} textAnchor="middle"
+            fill="#0a0e1a" fontSize="10" fontFamily="JetBrains Mono, monospace" fontWeight="700">{fmt(curP)}</text>
+
+          {/* time axis */}
+          {candles.filter((_, i) => i % Math.ceil(candles.length / 6) === 0).map((c, _, arr) => {
+            const idx = candles.indexOf(c);
+            const d = new Date(c.time);
+            const lbl = `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+            return <text key={idx} x={toX(idx)} y={PAD.top+chartH+20}
+              textAnchor="middle" fill={C.muted} fontSize="9" fontFamily="JetBrains Mono, monospace">{lbl}</text>;
+          })}
+        </svg>
+      );
+    }
+
+    // ── VOLUME CHART ─────────────────────────────────────────────────────────
+    function VolumeChart({ candles, width, height }) {
+      if (!candles.length) return null;
+      const PAD = { top: 4, right: 68, bottom: 18, left: 72 };
+      const chartW = width  - PAD.left - PAD.right;
+      const chartH = height - PAD.top  - PAD.bottom;
+      const maxV = Math.max(...candles.map(c => c.volume));
+      const bW   = Math.max(1, (chartW / candles.length) * 0.7);
+      const toX  = i => PAD.left + (i / (candles.length - 1)) * chartW;
+      return (
+        <svg width={width} height={height} style={{ display:"block" }}>
+          <text x={PAD.left-6} y={PAD.top+10} textAnchor="end" fill={C.muted} fontSize="9" fontFamily="JetBrains Mono, monospace">VOL</text>
+          {candles.map((c, i) => {
+            const bH = (c.volume / maxV) * chartH;
+            return <rect key={i} x={toX(i)-bW/2} y={PAD.top+chartH-bH} width={bW} height={bH}
+              fill={c.close >= c.open ? C.bull : C.bear} opacity="0.4" />;
+          })}
+        </svg>
+      );
+    }
+
+    // ── OI CHART ─────────────────────────────────────────────────────────────
+    function OIChart({ candles, width, height }) {
+      if (!candles.length) return null;
+      const PAD = { top: 8, right: 68, bottom: 18, left: 72 };
+      const chartW = width  - PAD.left - PAD.right;
+      const chartH = height - PAD.top  - PAD.bottom;
+      const oiVals = candles.map(c => c.oi);
+      const minOI  = Math.min(...oiVals) * 0.99;
+      const maxOI  = Math.max(...oiVals) * 1.01;
+      const toY = v => PAD.top + ((maxOI - v) / (maxOI - minOI)) * chartH;
+      const toX = i => PAD.left + (i / (candles.length - 1)) * chartW;
+
+      const n = Math.min(10, candles.length);
+      const rec = candles.slice(-n);
+      const pDir = rec[n-1].close - rec[0].close;
+      const oDir = rec[n-1].oi    - rec[0].oi;
+      const div  = (pDir > 0 && oDir < 0) || (pDir < 0 && oDir > 0);
+      const col  = div ? C.price : pDir > 0 ? C.bull : C.bear;
+
+      const pts  = candles.map((c, i) => `${toX(i)},${toY(c.oi)}`).join(" ");
+      const area = `${toX(0)},${PAD.top+chartH} ${pts} ${toX(candles.length-1)},${PAD.top+chartH}`;
+
+      return (
+        <svg width={width} height={height} style={{ display:"block" }}>
+          <defs>
+            <linearGradient id="oiGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%"   stopColor={col} stopOpacity="0.3" />
+              <stop offset="100%" stopColor={col} stopOpacity="0"   />
+            </linearGradient>
+          </defs>
+          <line x1={PAD.left} y1={PAD.top} x2={PAD.left} y2={PAD.top+chartH} stroke={C.grid} strokeWidth="1" />
+          <text x={PAD.left-6} y={PAD.top+10} textAnchor="end" fill={C.muted} fontSize="9" fontFamily="JetBrains Mono, monospace">OI</text>
+          <polygon points={area} fill="url(#oiGrad)" />
+          <polyline points={pts} fill="none" stroke={col} strokeWidth="1.5" />
+          <text x={PAD.left-6} y={toY(oiVals[oiVals.length-1])+4} textAnchor="end"
+            fill={col} fontSize="9" fontFamily="JetBrains Mono, monospace">{fmtK(oiVals[oiVals.length-1])}</text>
+          {div && <text x={PAD.left+chartW/2} y={PAD.top+chartH/2}
+            textAnchor="middle" fill={C.price} fontSize="9" fontFamily="JetBrains Mono, monospace" opacity="0.8">⚠ DIVERGENCE</text>}
+        </svg>
+      );
+    }
+
+    // ── ORDER BOOK ───────────────────────────────────────────────────────────
+    function OrderBookDepth({ orderBook, currentPrice, width, height }) {
+      if (!orderBook) return null;
+      const { bids, asks } = orderBook;
+      const allP   = [...bids.map(b => b.price), ...asks.map(a => a.price)];
+      const minP   = Math.min(...allP), maxP = Math.max(...allP);
+      const range  = maxP - minP;
+      const PAD    = { top: 20, right: 12, bottom: 20, left: 8 };
+      const chartH = height - PAD.top - PAD.bottom;
+      const chartW = width  - PAD.left - PAD.right;
+      const maxV   = Math.max(...bids.map(b => b.volume), ...asks.map(a => a.volume));
+      const toY    = p => PAD.top + ((maxP - p) / range) * chartH;
+      const toW    = v => (v / maxV) * chartW;
+      const totBid = bids.reduce((s, b) => s + b.volume, 0);
+      const totAsk = asks.reduce((s, a) => s + a.volume, 0);
+      const imb    = ((totBid - totAsk) / (totBid + totAsk)) * 100;
+      const imbCol = imb > 5 ? C.bull : imb < -5 ? C.bear : C.muted;
+
+      return (
+        <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ display:"block" }}>
+          <text x={width/2} y={14} textAnchor="middle" fill={C.muted} fontSize="9" fontFamily="JetBrains Mono, monospace">ORDER BOOK DEPTH</text>
+          {asks.map((a, i) => (
+            <rect key={"a"+i} x={PAD.left} y={toY(a.price)-2} width={toW(a.volume)} height={4}
+              fill={C.bear} opacity={0.6 - i*0.02} rx="1" />
+          ))}
+          {bids.map((b, i) => (
+            <rect key={"b"+i} x={PAD.left} y={toY(b.price)-2} width={toW(b.volume)} height={4}
+              fill={C.bull} opacity={0.6 - i*0.02} rx="1" />
+          ))}
+          <line x1={PAD.left} y1={toY(currentPrice)} x2={PAD.left+chartW} y2={toY(currentPrice)}
+            stroke={C.price} strokeWidth="1" strokeDasharray="3,3" />
+          <rect x={4} y={height-18} width={width-8} height={14} fill="#111827" rx="3" />
+          <rect x={4} y={height-18} width={(width-8)*(totBid/(totBid+totAsk))} height={14} fill={imbCol} rx="3" opacity="0.7" />
+          <text x={width/2} y={height-7} textAnchor="middle" fill={C.text} fontSize="8" fontFamily="JetBrains Mono, monospace">
+            {imb > 0 ? "+" : ""}{imb.toFixed(1)}% BID
+          </text>
+        </svg>
+      );
+    }
+
+    // ── SIGNAL PANEL ─────────────────────────────────────────────────────────
+    function SignalPanel({ candles, liquidations, orderBook }) {
+      if (!candles.length || !orderBook) return null;
+      const n    = Math.min(10, candles.length);
+      const rec  = candles.slice(-n);
+      const pDir = rec[n-1].close - rec[0].close;
+      const oDir = rec[n-1].oi    - rec[0].oi;
+
+      let oiSignal, oiLabel;
+      if      (pDir > 0 && oDir > 0) { oiSignal =  2; oiLabel = "BULLISH CONFIRMED"; }
+      else if (pDir > 0 && oDir < 0) { oiSignal =  0; oiLabel = "BEARISH DIVERGENCE"; }
+      else if (pDir < 0 && oDir > 0) { oiSignal = -2; oiLabel = "BEARISH CONFIRMED"; }
+      else                           { oiSignal =  1; oiLabel = "BULLISH DIVERGENCE"; }
+
+      const curP    = candles[candles.length-1].close;
+      const above   = liquidations.filter(l => l.side === "short" && l.price > curP && l.price < curP * 1.02);
+      const below   = liquidations.filter(l => l.side === "long"  && l.price < curP && l.price > curP * 0.98);
+      const aVol    = above.reduce((s, l) => s + l.amount, 0);
+      const bVol    = below.reduce((s, l) => s + l.amount, 0);
+      const liqSig  = aVol > bVol ? 2 : bVol > aVol ? -2 : 0;
+      const liqLbl  = aVol > bVol ? "BULLISH MAGNET (SHORTS)" : bVol > aVol ? "BEARISH MAGNET (LONGS)" : "NEUTRAL";
+
+      const totBid  = orderBook.bids.reduce((s, b) => s + b.volume, 0);
+      const totAsk  = orderBook.asks.reduce((s, a) => s + a.volume, 0);
+      const obImb   = (totBid - totAsk) / (totBid + totAsk);
+      const obSig   = obImb > 0.1 ? 2 : obImb < -0.1 ? -2 : 0;
+      const obLbl   = obSig > 0 ? "BUY PRESSURE" : obSig < 0 ? "SELL PRESSURE" : "BALANCED";
+
+      const comp    = (oiSignal + liqSig + obSig) / 3;
+      const getC    = s => s > 0.5 ? C.bull : s < -0.5 ? C.bear : C.price;
+      const compC   = getC(comp);
+      const compLbl = comp > 0.5 ? "BULLISH BIAS" : comp < -0.5 ? "BEARISH BIAS" : "NEUTRAL / CAUTION";
+
+      const sigs = [
+        { label:"OI vs PRICE",   value: oiLabel, score: oiSignal, icon:"◈" },
+        { label:"LIQUIDATIONS",  value: liqLbl,  score: liqSig,   icon:"◉" },
+        { label:"ORDER BOOK",    value: obLbl,   score: obSig,    icon:"◎" },
+      ];
+
+      return (
+        <div style={{ display:"flex", gap:"8px", alignItems:"stretch", height:"100%" }}>
+          {sigs.map((s, i) => {
+            const sc = getC(s.score);
+            return (
+              <div key={i} style={{
+                flex:1, background: C.bg, border:`1px solid ${sc}22`,
+                borderLeft:`3px solid ${sc}`, borderRadius:"6px", padding:"10px 12px",
+                display:"flex", flexDirection:"column", gap:"4px"
+              }}>
+                <div style={{ color:C.muted, fontSize:"9px", fontFamily:"JetBrains Mono, monospace", letterSpacing:"1px" }}>{s.icon} {s.label}</div>
+                <div style={{ color:sc, fontSize:"11px", fontFamily:"JetBrains Mono, monospace", fontWeight:"700" }}>{s.value}</div>
+                <div style={{ display:"flex", gap:"3px", marginTop:"4px" }}>
+                  {[-2,-1,0,1,2].map(v => (
+                    <div key={v} style={{
+                      width:"12px", height:"4px", borderRadius:"2px",
+                      background: v <= s.score && s.score > 0 ? C.bull
+                                : v >= s.score && s.score < 0 ? C.bear
+                                : v === 0 && s.score === 0    ? C.price
+                                : C.grid
+                    }} />
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* composite */}
+          <div style={{
+            width:"140px", background: C.bg, border:`1px solid ${compC}44`,
+            borderRadius:"6px", padding:"10px 12px",
+            display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:"6px"
+          }}>
+            <div style={{ color:C.muted, fontSize:"9px", fontFamily:"JetBrains Mono, monospace", letterSpacing:"1px" }}>COMPOSITE SIGNAL</div>
+            <div style={{
+              width:"52px", height:"52px", borderRadius:"50%",
+              border:`3px solid ${compC}`, display:"flex", alignItems:"center", justifyContent:"center",
+              background:`${compC}11`, boxShadow:`0 0 16px ${compC}44`
+            }}>
+              <span style={{ fontSize:"22px" }}>{comp > 0.5 ? "▲" : comp < -0.5 ? "▼" : "◆"}</span>
+            </div>
+            <div style={{ color:compC, fontSize:"10px", fontFamily:"JetBrains Mono, monospace", fontWeight:"700", textAlign:"center" }}>{compLbl}</div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── MAIN DASHBOARD ───────────────────────────────────────────────────────
+    function Dashboard() {
+      const [timeframe, setTimeframe]     = useState("1H");
+      const [candles, setCandles]         = useState([]);
+      const [liquidations, setLiquidations] = useState([]);
+      const [orderBook, setOrderBook]     = useState(null);
+      const [showLiq, setShowLiq]         = useState(true);
+      const [dims, setDims]               = useState({ width: window.innerWidth, height: window.innerHeight });
+      const [candleHeight, setCandleHeight] = useState(300);
+      const containerRef = useRef(null);
+      const candleRef    = useRef(null);
+
+      const BASE_PRICE   = 91420;
+      const CANDLE_COUNT = timeframe === "1H" ? 60 : 40;
+
+      // init & timeframe change
+      useEffect(() => {
+        const c = generateCandles(CANDLE_COUNT, BASE_PRICE, timeframe);
+        setCandles(c);
+        const last = c[c.length - 1].close;
+        setLiquidations(generateLiquidationLevels(last));
+        setOrderBook(generateOrderBook(last));
+      }, [timeframe]);
+
+      // live tick
+      useEffect(() => {
+        const id = setInterval(() => {
+          setCandles(prev => {
+            if (!prev.length) return prev;
+            const last = prev[prev.length - 1];
+            const change   = (Math.random() - 0.49) * 0.002 * last.close;
+            const newClose = +(last.close + change).toFixed(1);
+            const updated  = [...prev];
+            updated[updated.length - 1] = { ...last, close: newClose, high: Math.max(last.high, newClose), low: Math.min(last.low, newClose) };
+            return updated;
+          });
+          setOrderBook(prev => prev ? generateOrderBook(candles[candles.length-1]?.close ?? BASE_PRICE) : prev);
+        }, 2000);
+        return () => clearInterval(id);
+      }, [candles]);
+
+      // container resize
+      useEffect(() => {
+        const obs = new ResizeObserver(entries => {
+          for (const e of entries) setDims({ width: e.contentRect.width, height: e.contentRect.height });
+        });
+        if (containerRef.current) obs.observe(containerRef.current);
+        return () => obs.disconnect();
+      }, []);
+
+      // candle panel resize
+      useEffect(() => {
+        const obs = new ResizeObserver(entries => {
+          for (const e of entries) setCandleHeight(e.contentRect.height);
+        });
+        if (candleRef.current) obs.observe(candleRef.current);
+        return () => obs.disconnect();
+      }, []);
+
+      const curP    = candles[candles.length-1]?.close ?? 0;
+      const prevP   = candles[candles.length-2]?.close ?? curP;
+      const priceUp = curP >= prevP;
+      const pctChg  = candles[0] ? (((curP - candles[0].close) / candles[0].close) * 100).toFixed(2) : "0.00";
+
+      const HEADER_H = 56, SIGNAL_H = 90, OB_W = 140, VOL_H = 48, OI_H = 60;
+      const MAIN_W   = dims.width - OB_W - 8 - 16; // 16 = padding*2
+
+      return (
+        <div style={{ background:C.bg, color:C.text, height:"100vh", fontFamily:"JetBrains Mono, monospace", display:"flex", flexDirection:"column" }}>
+
+          {/* ── HEADER ── */}
+          <div style={{ display:"flex", alignItems:"center", gap:"20px", padding:"0 16px",
+            height:`${HEADER_H}px`, borderBottom:`1px solid ${C.grid}`, background:C.panel, flexShrink:0 }}>
+
+            {/* logo */}
+            <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
+              <div style={{ width:"28px", height:"28px", borderRadius:"50%",
+                background:"linear-gradient(135deg,#f7931a,#f7c948)",
+                display:"flex", alignItems:"center", justifyContent:"center",
+                fontSize:"14px", fontWeight:"700", color:"#0a0e1a" }}>₿</div>
+              <div>
+                <div style={{ fontSize:"13px", fontWeight:"700", color:C.text, letterSpacing:"1px" }}>BTC / USDT</div>
+                <div style={{ fontSize:"9px",  color:C.muted, letterSpacing:"1px" }}>PERPETUAL · BINANCE</div>
+              </div>
+            </div>
+
+            {/* price */}
+            <div style={{ display:"flex", alignItems:"baseline", gap:"8px" }}>
+              <span style={{ fontSize:"22px", fontWeight:"700", color:priceUp ? C.bull : C.bear, fontFamily:"Space Grotesk, sans-serif" }}>
+                ${fmt(curP)}
+              </span>
+              <span style={{ fontSize:"11px", color:priceUp ? C.bull : C.bear }}>
+                {priceUp ? "▲" : "▼"} {Math.abs(+pctChg)}%
+              </span>
+            </div>
+
+            {/* timeframe */}
+            <div style={{ display:"flex", gap:"4px", marginLeft:"auto" }}>
+              {["1H","4H"].map(tf => (
+                <button key={tf} className={`tf-btn${timeframe === tf ? " active" : ""}`} onClick={() => setTimeframe(tf)}>{tf}</button>
+              ))}
+            </div>
+
+            {/* liq toggle */}
+            <button className={`toggle-btn${showLiq ? " active" : ""}`} onClick={() => setShowLiq(v => !v)}>LIQ MAP</button>
+
+            {/* live dot */}
+            <div style={{ display:"flex", alignItems:"center", gap:"5px" }}>
+              <div style={{ width:"6px", height:"6px", borderRadius:"50%", background:C.bull,
+                animation:"pulse 2s infinite", boxShadow:`0 0 6px ${C.bull}` }} />
+              <span style={{ fontSize:"9px", color:C.muted }}>LIVE · SIMULATED</span>
+            </div>
+          </div>
+
+          {/* ── MAIN AREA ── */}
+          <div ref={containerRef} style={{ flex:1, display:"flex", overflow:"hidden", padding:"8px", gap:"8px", alignItems:"stretch" }}>
+
+            {/* left column */}
+            <div style={{ flex:1, display:"flex", flexDirection:"column", minWidth:0 }}>
+
+              {/* legend */}
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"0 8px 4px", flexShrink:0 }}>
+                <div style={{ fontSize:"9px", color:C.muted, letterSpacing:"1px" }}>
+                  {showLiq && <span style={{ color:"rgba(255,59,92,0.4)", marginRight:"10px" }}>● LONG LIQ</span>}
+                  {showLiq && <span style={{ color:"rgba(0,229,160,0.4)", marginRight:"10px" }}>● SHORT LIQ</span>}
+                  <span style={{ color:"rgba(247,201,72,0.4)" }}>─ CURRENT PRICE</span>
+                </div>
+                <div style={{ fontSize:"9px", color:C.muted }}>
+                  OI: <span style={{ color:C.bull }}>{fmtK(candles[candles.length-1]?.oi ?? 0)}M</span>
+                </div>
+              </div>
+
+              {/* candle panel */}
+              <div ref={candleRef} style={{ flex:1, minHeight:0, background:C.panel,
+                borderRadius:"8px 8px 0 0", border:`1px solid ${C.grid}`, borderBottom:"none", overflow:"hidden" }}>
+                <CandleChart candles={candles} liquidations={showLiq ? liquidations : []} width={MAIN_W} height={candleHeight} />
+              </div>
+
+              {/* volume */}
+              <div style={{ height:`${VOL_H}px`, background:C.panel, border:`1px solid ${C.grid}`,
+                borderTop:`1px solid #0f1520`, borderBottom:"none" }}>
+                <VolumeChart candles={candles} width={MAIN_W} height={VOL_H} />
+              </div>
+
+              {/* OI */}
+              <div style={{ height:`${OI_H}px`, background:C.panel,
+                borderRadius:"0 0 8px 8px", border:`1px solid ${C.grid}`, borderTop:`1px solid #0f1520` }}>
+                <OIChart candles={candles} width={MAIN_W} height={OI_H} />
+              </div>
+            </div>
+
+            {/* right column — order book */}
+            <div style={{ width:`${OB_W}px`, display:"flex", flexDirection:"column", flexShrink:0 }}>
+              <div style={{ height:`${candleHeight}px`, background:C.panel,
+                borderRadius:"8px 8px 0 0", border:`1px solid ${C.grid}`, borderBottom:"none", overflow:"hidden" }}>
+                <OrderBookDepth orderBook={orderBook} currentPrice={curP} width={OB_W} height={candleHeight} />
+              </div>
+              <div style={{ height:`${VOL_H+OI_H}px`, background:C.panel,
+                borderRadius:"0 0 8px 8px", border:`1px solid ${C.grid}`, borderTop:`1px solid #0f1520`,
+                display:"flex", alignItems:"center", justifyContent:"center" }}>
+                <span style={{ fontSize:"8px", color:C.grid, letterSpacing:"1px" }}>DEPTH</span>
+              </div>
+            </div>
+          </div>
+
+          {/* ── SIGNAL PANEL ── */}
+          <div style={{ height:`${SIGNAL_H}px`, padding:"0 8px 8px", flexShrink:0 }}>
+            <div style={{ background:C.panel, borderRadius:"8px", border:`1px solid ${C.grid}`, padding:"8px", height:"100%" }}>
+              <div style={{ fontSize:"9px", color:C.muted, letterSpacing:"1px", marginBottom:"6px" }}>COMPOSITE SIGNAL PANEL</div>
+              <SignalPanel candles={candles} liquidations={liquidations} orderBook={orderBook} />
+            </div>
+          </div>
+
+          {/* ── FOOTER ── */}
+          <div style={{ padding:"4px 16px 6px", borderTop:`1px solid ${C.grid}`, display:"flex", justifyContent:"space-between", flexShrink:0 }}>
+            <span style={{ fontSize:"8px", color:C.muted }}>
+              ⚠ SIMULATED DATA — For real data: Binance Futures API (candles + OI) · Coinglass API (liquidations) · Bybit L2 WebSocket (order book)
+            </span>
+            <span style={{ fontSize:"8px", color:C.grid }}>Built with React + SVG · No charting libraries</span>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<Dashboard />);
+  </script>
+</body>
+</html>
